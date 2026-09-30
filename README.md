@@ -76,10 +76,14 @@ node sync-install.mjs <profileDir>      # 也可以只跑 node sync-install.mjs�
     dataDir: '<数据目录>'                                  # 默认按作者机器设置，换机器请改
     docxFile: '轴承钢滚动接触疲劳-文献知识库.docx'
     docxTitle: '轴承钢滚动接触疲劳 · 文献知识库'
-    provider: ''          # 留空 = 第一个已注册的 provider
-    model: ''             # 留空 = 该 provider 的第一个模型
+    provider: ''          # 留空 = 先用本组合的默认模型路由
+    model: ''             # 留空 = 跟随该路由的 model
     maxOutputTokens: 4096 # 调用时作为 maxTokens
 ```
+
+审阅调用的 provider/model 按这个顺序解析：`config` 里显式的 provider+model →
+本组合的默认模型路由（`agentDefaultModel.currentSelection()`，也就是你日常会话在用的那个）→
+第一个已注册 provider 的第一个模型。用 `ctx.get()` 读默认路由，所以组合里没有这个服务也能加载。
 
 ## 写 dsh 插件踩过的两个坑
 
@@ -101,6 +105,12 @@ node sync-install.mjs <profileDir>      # 也可以只跑 node sync-install.mjs�
 `maxTokens`（不是 `maxOutputTokens`），且 `ctx.llm.stream()` 必须给**确切 model**；
 客户端往 `single` 座位（如 `conversation.session.header.corner`，已被自带按钮占用）
 注册第二个组件会抛错，入口按钮要用 `conversation.session.header.utilities` 这类 `list` 座位。
+
+第 4 个坑不那么显眼：**「第一个已注册的 provider」不等于「你会话在用的 provider」**。
+本机同时注册了 `deepseek-official`（没配 API key）和 `deepseek-account`（账号登录在用），
+按注册顺序取第一个，审阅会直接失败在 `MISSING_CREDENTIAL`。跟随组合默认路由
+（`ctx.get('agentDefaultModel').currentSelection()`）才是对的——`ctx.get()` 不需要
+`inject`，所以组合里没有这个服务时插件照样能加载。
 
 ## 测试
 

@@ -123,12 +123,27 @@ class FakeWebServer extends Service {
   }
 }
 
+/** The composition's default model selection (what the user's sessions use). */
+class FakeDefaultModel extends Service {
+  constructor(ctx) {
+    super(ctx, 'agentDefaultModel')
+  }
+  currentSelection() { return { provider: 'deepseek-account', model: 'deepseek-flash' } }
+}
+
 class FakeLlm extends Service {
   constructor(ctx) {
     super(ctx, 'llm')
     this.calls = []
   }
-  listProviders() { return [{ id: 'deepseek-account', name: 'DeepSeek', models: [{ id: 'deepseek-flash' }] }] }
+  // Registered first but credential-less: the plugin must not simply take this
+  // route, which is what broke the live review call.
+  listProviders() {
+    return [
+      { id: 'deepseek-official', name: 'DeepSeek API', models: [{ id: 'deepseek-chat' }] },
+      { id: 'deepseek-account', name: 'DeepSeek', models: [{ id: 'deepseek-flash' }] },
+    ]
+  }
   async listModels() { return [{ id: 'deepseek-flash', name: 'DeepSeek Flash' }] }
   async *stream(options) {
     this.calls.push(options)
@@ -149,6 +164,7 @@ async function mount(pluginObject, label, config = { dataDir }) {
   const root = new Context()
   await root.plugin(FakeWebServer)
   await root.plugin(FakeLlm)
+  await root.plugin(FakeDefaultModel)
   const webServer = root.get('webServer')
   let applied = false
   const base = pluginObject ?? plugin
@@ -234,7 +250,9 @@ console.log('\n[6] the review route runs through the real chunk protocol')
   check('both deltas survive the assembly', String(json.review).includes('建议追读'))
   const llm = mounted.root.get('llm')
   check('exactly one model call', llm.calls.length === 1, 'calls=' + llm.calls.length)
-  check('call names an exact model', llm.calls[0]?.model === 'deepseek-flash', JSON.stringify(llm.calls[0]?.model))
+  check('call follows the composition default route, not registry order',
+    llm.calls[0]?.provider === 'deepseek-account' && llm.calls[0]?.model === 'deepseek-flash',
+    JSON.stringify({ provider: llm.calls[0]?.provider, model: llm.calls[0]?.model }))
   check('call caps output with maxTokens', llm.calls[0]?.maxTokens === plugin.DEFAULTS.maxOutputTokens, String(llm.calls[0]?.maxTokens))
   await new Promise((r) => server.close(r))
 }

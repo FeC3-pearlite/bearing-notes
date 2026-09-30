@@ -48,6 +48,11 @@ const ctx = {
     if (typeof dispose === 'function') cleanups.push(dispose)
     return () => {}
   },
+  // Read without an inject dependency, exactly like Cordis `ctx.get(name)`.
+  get(name) {
+    if (name !== 'agentDefaultModel') return undefined
+    return { currentSelection: () => ({ provider: 'deepseek-account', model: 'deepseek-flash' }) }
+  },
   webServer: {
     port: 0,
     register(route) {
@@ -63,7 +68,13 @@ const ctx = {
   },
   llm: {
     // Real LlmRuntime shape: listProviders() returns provider metadata objects.
-    listProviders: () => [{ id: 'deepseek-account', name: 'DeepSeek', models: [{ id: 'deepseek-flash' }] }],
+    // `deepseek-official` is registered first but carries no credential; the
+    // call must follow the composition's default route instead of the registry
+    // order.
+    listProviders: () => [
+      { id: 'deepseek-official', name: 'DeepSeek API', models: [{ id: 'deepseek-chat' }] },
+      { id: 'deepseek-account', name: 'DeepSeek', models: [{ id: 'deepseek-flash' }] },
+    ],
     listModels: async () => [{ id: 'deepseek-flash', name: 'DeepSeek Flash' }],
     // Emits the real StreamChunk protocol: typed chunks, terminal `finish`.
     async *stream(options) {
@@ -174,7 +185,8 @@ console.log('\n[4] POST review (draft, no id) -> stubbed model output assembled'
   check('review assembled from deltas', String(json?.review).includes('M3C'), json?.review?.slice(0, 40))
   check('review has section headers', String(json?.review).includes('### 3. 相关知识延伸'))
   check('llm was called once', llmCalls === 1, 'calls=' + llmCalls)
-  check('call carries an exact model route', lastCall?.provider === 'deepseek-account' && lastCall?.model === 'deepseek-flash',
+  check('call follows the composition default, not registry order',
+    lastCall?.provider === 'deepseek-account' && lastCall?.model === 'deepseek-flash',
     JSON.stringify({ provider: lastCall?.provider, model: lastCall?.model }))
   check('call caps output with maxTokens', lastCall?.maxTokens === DEFAULTS.maxOutputTokens, String(lastCall?.maxTokens))
   check('call sends one request-only user message', Array.isArray(lastCall?.messages) && lastCall.messages.length === 1 && lastCall.messages[0].role === 'user',

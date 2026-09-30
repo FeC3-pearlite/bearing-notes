@@ -123,12 +123,30 @@ export function apply(ctx, config = {}) {
 
   // ---------------------------------------------------------------- model ----
   /**
-   * Pick the provider/model route. An explicit `provider`/`model` in the
-   * config wins; otherwise the first registered provider and the first model
+   * The route this composition's own sessions use. Read through `ctx.get()`,
+   * which needs no inject dependency, so a composition without the service
+   * still loads this plugin.
+   */
+  function compositionRoute() {
+    try {
+      const selection = ctx.get('agentDefaultModel')?.currentSelection?.()
+      return selection?.provider && selection?.model ? selection : null
+    } catch { return null }
+  }
+
+  /**
+   * Pick the provider/model route: an explicit `provider`/`model` pair from the
+   * config, then the composition's default route (the model the user's sessions
+   * actually run on), then the first registered provider with the first model
    * it advertises. The LLM runtime rejects a call without an exact model, so
-   * this always resolves a concrete model id.
+   * this always resolves a concrete model id. Picking "the first registered
+   * provider" alone is wrong in compositions where that route has no
+   * credential while the session default does.
    */
   async function resolveRoute() {
+    if (options.provider && options.model) return { provider: options.provider, model: options.model }
+    const preferred = compositionRoute()
+    if (preferred && !options.provider) return { provider: preferred.provider, model: options.model || preferred.model }
     let providers = []
     try { providers = ctx.llm.listProviders() ?? [] } catch { providers = [] }
     const first = providers[0]
@@ -148,6 +166,8 @@ export function apply(ctx, config = {}) {
       const model = typeof candidate === 'string' ? candidate : candidate?.id ?? candidate?.model
       if (model) return { provider, model }
     } catch { /* reported below as an unresolvable route */ }
+    // A configured provider that advertises nothing still needs some model id.
+    if (preferred?.model) return { provider, model: preferred.model }
     return null
   }
 
