@@ -1,0 +1,12 @@
+# 测试与临时产物
+out/
+*.docx
+*.log
+
+# 依赖
+node_modules/
+
+# 系统文件
+Thumbs.db
+.DS_Store
+desktop.ini

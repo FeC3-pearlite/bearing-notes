@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="文献知识库">
+  <rect x="2.5" y="3.5" width="27" height="25" rx="4" fill="#247bbf"/>
+  <rect x="6" y="7" width="13" height="2.2" rx="1.1" fill="#ffffff" opacity="0.95"/>
+  <rect x="6" y="11.4" width="20" height="2.2" rx="1.1" fill="#ffffff" opacity="0.8"/>
+  <rect x="6" y="15.8" width="20" height="2.2" rx="1.1" fill="#ffffff" opacity="0.8"/>
+  <rect x="6" y="20.2" width="11" height="2.2" rx="1.1" fill="#ffffff" opacity="0.8"/>
+  <circle cx="24.5" cy="24.5" r="6" fill="#ffffff"/>
+  <circle cx="24.5" cy="24.5" r="4.2" fill="none" stroke="#247bbf" stroke-width="1.4"/>
+  <circle cx="24.5" cy="24.5" r="1.5" fill="#247bbf"/>
+</svg>

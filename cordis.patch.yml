@@ -1,0 +1,3 @@
+- insert:
+    - id: bearing-notes
+      name: '@local/bearing-notes'
