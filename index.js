@@ -9,6 +9,11 @@ import { resolve, join } from 'node:path'
 import { existsSync, mkdirSync } from 'node:fs'
 import { NoteStore } from './lib/store.mjs'
 import { buildReviewPrompt, buildFollowUpPrompt, DOMAIN, CONCEPTS, PITFALLS } from './lib/domain.mjs'
+import { GLOSSARY, CATEGORIES, glossaryStats, protectedTokens } from './lib/glossary.mjs'
+import {
+  chunkText, translateChunk, summarizeTerms, describeTerms,
+  MAX_TEXT_CHARS, MAX_CHUNKS, MAX_CHUNK_CHARS, TRANSLATE_MODES, TRANSLATE_STYLES,
+} from './lib/translate.mjs'
 
 export const name = 'bearing-notes'
 
@@ -261,6 +266,89 @@ export function apply(ctx, config = {}) {
           source: body.source,
         })
         sendJson(res, 200, { ok: true, id: added.note.id, total: added.total, docxPath: added.docx, ...snapshot() })
+        return
+      }
+
+      if (method === 'GET' && action === 'glossary') {
+        sendJson(res, 200, {
+          ok: true,
+          stats: glossaryStats(),
+          categories: CATEGORIES,
+          entries: GLOSSARY,
+          modes: TRANSLATE_MODES,
+          styles: TRANSLATE_STYLES,
+        })
+        return
+      }
+
+      if (method === 'POST' && action === 'translate') {
+        const body = await readJson(req)
+        const text = String(body.text ?? '').trim()
+        if (text === '') { sendJson(res, 400, { ok: false, error: '请先给出要翻译的文字' }); return }
+        if (text.length > MAX_TEXT_CHARS) {
+          sendJson(res, 413, { ok: false, error: `文字太长（${text.length} 字），一次最多 ${MAX_TEXT_CHARS} 字，请分段翻译` })
+          return
+        }
+        const mode = body.mode === 'en' ? 'en' : body.mode === 'terms' ? 'terms' : 'zh'
+        // Term lookup is a local glossary query: no model call, works offline.
+        if (mode === 'terms') {
+          sendJson(res, 200, {
+            ok: true,
+            mode,
+            style: null,
+            translation: '',
+            ...describeTerms(text, { limit: body.limit ?? 60 }),
+            chunks: 0,
+            retried: false,
+            warnings: [],
+            model: null,
+          })
+          return
+        }
+        const style = body.style === 'literal' ? 'literal' : 'readable'
+        const bilingual = body.bilingual === true
+        const chunks = chunkText(text)
+        if (chunks.length > MAX_CHUNKS) {
+          sendJson(res, 413, { ok: false, error: `分段后仍有 ${chunks.length} 段（每段上限 ${MAX_CHUNK_CHARS} 字），请分批翻译` })
+          return
+        }
+        const modelRoute = await resolveRoute()
+        if (modelRoute === null) throw new Error('没有可用的模型路由：请在插件配置里指定 provider 与 model。')
+        const parts = []
+        const collected = new Map()
+        const warnings = []
+        let retried = false
+        for (const [index, chunk] of chunks.entries()) {
+          const result = await translateChunk({
+            text: chunk,
+            mode,
+            style,
+            bilingual,
+            extra: typeof body.extra === 'string' ? body.extra : undefined,
+            call: (prompt) => streamText(prompt),
+          })
+          parts.push(result.text.trim())
+          retried = retried || result.retried
+          for (const term of result.terms) collected.set(term.en, term)
+          if (result.missing.length > 0) {
+            warnings.push(`第 ${index + 1} 段仍有术语未按对照表出现：${result.missing.map((t) => `${t.en} → ${t.zh}`).join('、')}`)
+          }
+        }
+        const translation = parts.filter((part) => part !== '').join('\n\n').trim()
+        if (translation === '') throw new Error('模型没有返回译文，请稍后重试或换一个模型。')
+        sendJson(res, 200, {
+          ok: true,
+          mode,
+          style,
+          bilingual,
+          translation,
+          terms: summarizeTerms([...collected.values()]),
+          protectedTokens: protectedTokens(text),
+          chunks: chunks.length,
+          retried,
+          warnings,
+          model: modelRoute.model,
+        })
         return
       }
 

@@ -68,7 +68,6 @@ node sync-install.mjs <profileDir>      # 也可以只跑 node sync-install.mjs�
 ## 配置
 
 在 loader 行的 `config` 里覆盖（`sync-install.mjs` 与 `cordis.patch.yml` 里都能改）：
-
 ```yaml
 - id: bearing-notes
   name: '@local/bearing-notes'
@@ -84,6 +83,28 @@ node sync-install.mjs <profileDir>      # 也可以只跑 node sync-install.mjs�
 审阅调用的 provider/model 按这个顺序解析：`config` 里显式的 provider+model →
 本组合的默认模型路由（`agentDefaultModel.currentSelection()`，也就是你日常会话在用的那个）→
 第一个已注册 provider 的第一个模型。用 `ctx.get()` 读默认路由，所以组合里没有这个服务也能加载。
+
+## 翻译（术语约束）
+
+`lib/glossary.mjs` 是本项目对「专有名词译准」这件事的全部机械化手段：
+
+- **术语库锁定**：文中命中的术语逐条写进提示词（`rolling contact fatigue = 滚动接触疲劳（RCF）`），
+  长词优先、允许嵌套（`depth of maximum shear stress` 与 `maximum shear stress` 会同时钉住）。
+- **高频误译禁令**：`white etching area` 写「白蚀区」不要写「白色腐蚀区」、`cleanliness` 写「洁净度」
+  不要写「清洁度」、`spalling` 写「剥落」不要写「碎裂」、`shakedown` 写「安定」不要写「抖松」等 19 条。
+- **禁译清单**：牌号 / 标准号 / 符号 / 单位保留原文（正则匹配后写进提示词，也在响应里返回）。
+- **译后核对 + 一次重译**：`verifyTerms()` 检查钉住的术语是否真的出现在译文里；
+  漏了就带着缺失清单重译一次，两次都不达标时选漏得少的那版并把警告返回给调用方。
+
+路由：
+
+```
+GET  /bearing-notes/glossary    # 术语库（214 条 + 类别 + 统计），不需要模型
+POST /bearing-notes/translate   # { text, mode: 'zh'|'en'|'terms', style, bilingual, extra }
+                                # → { translation, terms, protectedTokens, chunks, retried, warnings }
+```
+
+`mode: 'terms'` 是纯本地术语速查（不调用模型，断网可用）。长文按段落/句末自动分段，逐段翻译后拼接。
 
 ## 写 dsh 插件踩过的两个坑
 
@@ -115,21 +136,27 @@ node sync-install.mjs <profileDir>      # 也可以只跑 node sync-install.mjs�
 ## 测试
 
 ```bash
-node test-docx.mjs     # Word 生成 + 回读
-node test-store.mjs    # 笔记存储 + 持久化
-node test-host.mjs     # Host 半：真实 HTTP 52 项断言
-node test-client.mjs   # 浏览器半：注册契约 57 项断言
-node test-cordis.mjs   # 用 dsh 自带的 Cordis 真实挂载：激活 + 注入 + 流协议
+node test-docx.mjs       # Word 生成 + 回读
+node test-store.mjs      # 笔记存储 + 持久化
+node test-host.mjs       # Host 半：真实 HTTP 52 项断言
+node test-client.mjs     # 浏览器半：注册契约 57 项断言
+node test-cordis.mjs     # 用 dsh 自带的 Cordis 真实挂载：激活 + 注入 + 流协议（24 项）
+node test-translate.mjs  # 术语库 + 提示词约束 + 译后重译 + 翻译路由（67 项）
 ```
 
 `test-cordis.mjs` 会从已安装 dsh 的 `app.asar` 里取出它实际使用的 Cordis 运行时
 （`DSH_ASAR` 环境变量可覆盖路径），用真实运行时挂载本插件，覆盖 `test-host.mjs`
 看不到的声明形状问题，并把上面两个坑都留成回归断言。
 
+`test-translate.mjs` 里最关键的一条是**重译**：桩模型第一次故意漏掉被钉住的术语，
+断言插件确实发现缺失、第二次提示词里带上缺失清单、并把第二次结果返回给调用方。
+
 ## 已知限制
 
 - Word 只用了 WordprocessingML 的最小集（标题 / 正文 / 项目符号 / 加粗 / 斜体 / 等宽），
   没有表格、图片、目录域（目录是手写的段落列表，不含页码）。
+- 术语库是人工整理的 214 条，覆盖常用术语；没进库的新词按模型通用译法处理。
+- 译后核对只验证「钉住的术语有没有出现」，不判断译文整体忠实度。
 - 审阅质量取决于所配模型。
 - 侧栏渲染效果没有做浏览器内的自动化视觉验证。
 

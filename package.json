@@ -22,6 +22,8 @@
     "lib/docx.mjs",
     "lib/store.mjs",
     "lib/domain.mjs",
+    "lib/glossary.mjs",
+    "lib/translate.mjs",
     "cordis.patch.yml",
     "icon.svg",
     "locale/*.json"

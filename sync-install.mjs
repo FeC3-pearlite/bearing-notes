@@ -32,6 +32,8 @@ const FILES = [
   'lib/docx.mjs',
   'lib/store.mjs',
   'lib/domain.mjs',
+  'lib/glossary.mjs',
+  'lib/translate.mjs',
   'locale/zh.json',
   'locale/en.json',
 ]
