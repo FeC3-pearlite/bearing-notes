@@ -77,12 +77,22 @@ node sync-install.mjs <profileDir>      # 也可以只跑 node sync-install.mjs�
     docxTitle: '轴承钢滚动接触疲劳 · 文献知识库'
     provider: ''          # 留空 = 先用本组合的默认模型路由
     model: ''             # 留空 = 跟随该路由的 model
-    maxOutputTokens: 4096 # 调用时作为 maxTokens
+    maxOutputTokens: 8192 # 调用时作为 maxTokens 的起始值，被截断会自动翻倍重试
 ```
 
 审阅调用的 provider/model 按这个顺序解析：`config` 里显式的 provider+model →
 本组合的默认模型路由（`agentDefaultModel.currentSelection()`，也就是你日常会话在用的那个）→
 第一个已注册 provider 的第一个模型。用 `ctx.get()` 读默认路由，所以组合里没有这个服务也能加载。
+
+**输出预算与推理**：翻译/审阅是直给的调用，不经过 agent loop，因此默认会继承模型自己声明的
+推理档位。实测在 `deepseek-flash` 上，一个又长又粘连的 PDF 选区会让模型把 4096 的输出预算
+**全部花在推理**上，正文一个字都没有，流以 `max-tokens` 结束——UI 上就是
+「模型调用失败：模型以 max-tokens 结束」。现在的处理是两条：
+
+1. 先查 `ctx.llm.resolveModelInfo(provider, model)`，从模型自己声明的档位里挑最便宜的
+   （deepseek 系列是 `off`）并显式传入 `reasoningEffort`；查不到就不传，不会因为档位名不被支持而报错。
+2. 万一仍然以 `max-tokens` 结束，就**把预算翻倍重试**（8192 → 16384 → 32768），返回最长的那次；
+   三次都为空才报错，并且报错信息直接告诉你去调 `maxOutputTokens` 或换更轻的模型。
 
 ## 翻译（术语约束）
 
@@ -105,6 +115,11 @@ POST /bearing-notes/translate   # { text, mode: 'zh'|'en'|'terms', style, biling
 ```
 
 `mode: 'terms'` 是纯本地术语速查（不调用模型，断网可用）。长文按段落/句末自动分段，逐段翻译后拼接。
+
+**输入可能来自 PDF 文本层**：浏览器给的选区常常丢掉词间空格（`shown infigure33`、
+`thevacuumdegassedAM`），还会把上下标引用编号焊进词中间。`looksLikePdfNoise()` 检测到这种
+指纹（18 个字母以上的连续串、字母直接接数字）时才追加一段「先还原分词再翻译」的规则，
+正常段落不会背上这条约束。
 
 ## 写 dsh 插件踩过的两个坑
 

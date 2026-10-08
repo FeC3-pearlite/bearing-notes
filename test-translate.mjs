@@ -13,7 +13,7 @@ const here = dirname(fileURLToPath(import.meta.url))
 const { apply, ROUTE_PREFIX, DEFAULTS } = await import(new URL('./index.js', import.meta.url).href)
 const { GLOSSARY, findTerms, requiredTerms, verifyTerms, protectedTokens, lookup, glossaryStats, MISTRANSLATIONS } =
   await import(new URL('./lib/glossary.mjs', import.meta.url).href)
-const { buildTranslatePrompt, chunkText, translateChunk, MAX_CHUNK_CHARS } =
+const { buildTranslatePrompt, chunkText, translateChunk, MAX_CHUNK_CHARS, looksLikePdfNoise } =
   await import(new URL('./lib/translate.mjs', import.meta.url).href)
 
 const dataDir = `${here.replace(/\\/g, '/')}/out/translate-test`
@@ -78,6 +78,23 @@ console.log('\n[4] the prompt pins terms, bans the known mistranslations and car
   check('source text is fenced', prompt.includes('"""') && prompt.includes(text))
   check('terms outside the glossary are not pinned', !prompt.includes('贝氏体'))
   check('retry prompt lists the missing terms', buildTranslatePrompt({ text, mode: 'zh', terms, missing: [terms[0]] }).includes('上一次翻译的问题'))
+}
+
+console.log('\n[4b] a PDF-garbled selection gets the word-restoration rule')
+{
+  // Exactly what the side panel received from a PDF text layer.
+  const garbled = 'The life factors shown infigure33 forVIM-VAR52100 against thevacuumdegassedAM, sometimesreferredtoascar bonvacuumdegassed, arequitesimilar to the published material life factors.'
+  check('garbled input is recognised', looksLikePdfNoise(garbled) === true, String(looksLikePdfNoise(garbled)))
+  const prompt = buildTranslatePrompt({ text: garbled, mode: 'zh' })
+  check('the prompt asks for word restoration', prompt.includes('先还原分词'), prompt.slice(0, 80))
+  check('the prompt names the failure pattern', prompt.includes('infigure33') && prompt.includes('thevacuumdegassedAM'))
+  check('it forbids explaining the segmentation', prompt.includes('不要输出任何分词说明'))
+  // A clean paragraph must not carry the extra section.
+  const clean = 'The life factors shown in figure 33 for VIM-VAR 52100 are quite similar to the published values.'
+  check('clean text is not flagged', looksLikePdfNoise(clean) === false, String(looksLikePdfNoise(clean)))
+  check('clean prompt stays free of the rule', !buildTranslatePrompt({ text: clean, mode: 'zh' }).includes('先还原分词'))
+  check('one long run in a long passage is not enough', looksLikePdfNoise(`${'word '.repeat(120)}supercalifragilisticexpialidocious`) === false)
+  check('empty text is not flagged', looksLikePdfNoise('') === false)
 }
 
 console.log('\n[5] verification catches dropped terms')

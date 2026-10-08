@@ -40,8 +40,12 @@ export const DEFAULTS = {
   provider: '',
   /** Model id for the review call; empty means "the provider's first model". */
   model: '',
-  /** Cap on review output tokens. */
-  maxOutputTokens: 4096,
+  /**
+   * Starting cap on output tokens for review and translation calls. The plugin
+   * doubles this (up to 32768) when a model finishes with `max-tokens`, which is
+   * what happens when the budget goes into reasoning instead of the answer.
+   */
+  maxOutputTokens: 8192,
 }
 
 const STRING_FIELDS = ['dataDir', 'docxFile', 'docxTitle', 'provider', 'model']
@@ -176,41 +180,97 @@ export function apply(ctx, config = {}) {
     return null
   }
 
-  async function streamText(prompt) {
+  /**
+   * Reasoning effort ids that are cheap enough for translation. A translation
+   * does not need deep thinking, and on this composition the model's default
+   * effort (max) spends the *whole* output budget on reasoning, leaving no
+   * visible text and a `max-tokens` finish — the failure this lookup fixes.
+   */
+  const CHEAP_EFFORTS = ['minimal', 'none', 'off', 'disabled', 'low', 'quick', 'fast']
+  const effortCache = new Map()
+
+  /** Cheapest reasoning effort the exact model supports, or undefined. */
+  async function preferredEffort(provider, model) {
+    const key = `${provider}|${model}`
+    if (effortCache.has(key)) return effortCache.get(key)
+    let effort
+    try {
+      const info = await ctx.llm.resolveModelInfo(provider, model)
+      const efforts = info?.reasoning?.efforts ?? []
+      const cheap = efforts.find((entry) => CHEAP_EFFORTS.includes(String(entry?.id ?? '').toLowerCase()))
+      // Only pin an effort we know is cheap; otherwise leave the model default.
+      effort = cheap?.id
+    } catch { effort = undefined }
+    effortCache.set(key, effort)
+    return effort
+  }
+
+  /**
+   * One model call, returning the text *and* how the stream ended.
+   *
+   * The finish reason matters: `max-tokens` with no text means the budget went
+   * into reasoning, and the caller retries with a bigger one instead of showing
+   * an empty translation.
+   *
+   * @param {string} prompt
+   * @param {{maxTokens?:number, effort?:string, cheap?:boolean}} [options]
+   * @returns {Promise<{text:string, finish:object|null, route:object}>}
+   */
+  async function streamText(prompt, { maxTokens = options.maxOutputTokens, effort, cheap = false } = {}) {
     const route = await resolveRoute()
     if (!route) throw new Error('没有可用的模型路由：请在插件配置里指定 provider 与 model（或先连上一个模型账号）。')
+    const reasoningEffort = effort ?? (cheap ? await preferredEffort(route.provider, route.model) : undefined)
     // GenerateOptions: `system` is the system prompt channel, `maxTokens` the
-    // output cap; a bare user message is a valid request-only input.
+    // output cap, `reasoningEffort` a model-declared effort id.
     const call = {
       provider: route.provider,
       model: route.model,
       messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
-      maxTokens: options.maxOutputTokens,
+      maxTokens,
+      ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     }
     // StreamChunk protocol: text arrives as { type: 'text-delta', text } and the
     // stream ends with one { type: 'finish', reason } chunk.
     let out = ''
-    let failure = null
+    let finish = null
     for await (const chunk of ctx.llm.stream(call)) {
       if (!chunk || typeof chunk !== 'object') continue
       if (chunk.type === 'text-delta') { out += textOf(chunk); continue }
-      if (chunk.type === 'finish') {
-        const reason = chunk.reason ?? {}
-        if (reason.kind === 'error' || reason.kind === 'aborted') {
-          failure = reason.failure ?? { message: String(reason.kind) }
-        } else if (reason.kind !== undefined && reason.kind !== 'stop') {
-          failure = { message: `模型以 ${reason.kind} 结束` }
-        }
-      }
+      if (chunk.type === 'finish') finish = chunk.reason ?? {}
     }
-    if (!out.trim()) {
-      if (failure) {
-        const detail = failure.message || failure.code || 'model call failed'
-        throw new Error(`模型调用失败：${detail}${failure.code && failure.code !== detail ? ' (' + failure.code + ')' : ''}`)
-      }
-      throw new Error('模型没有返回任何内容，请稍后重试或在插件配置里换一个模型。')
+    return { text: out, finish, route }
+  }
+
+  /**
+   * A model call that is allowed to grow its budget once the output cap is hit.
+   * Returns the longest text seen; an empty result means the model never got to
+   * the answer.
+   */
+  async function streamTextWithBudget(prompt, { maxTokens = options.maxOutputTokens, cheap = true, attempts = 3 } = {}) {
+    let budget = maxTokens
+    let best = ''
+    let finish = null
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const result = await streamText(prompt, { maxTokens: budget, cheap })
+      finish = result.finish
+      if (result.text.length > best.length) best = result.text
+      if (result.finish?.kind !== 'max-tokens') return { text: result.text, finish: result.finish, attempts: attempt + 1 }
+      // Truncated: double the cap and try again (a reasoning-heavy model needs
+      // room for both the reasoning and the answer).
+      if (budget >= 32_768) break
+      budget = Math.min(budget * 2, 32_768)
     }
-    return out
+    return { text: best, finish, attempts }
+  }
+
+  /** Model-call failure text that names the real cause and the knob to turn. */
+  function budgetError(finish) {
+    if (finish?.kind === 'max-tokens') {
+      return '模型把输出预算用在推理上了（max-tokens）：译文一个字都没留下。请在插件配置里调大 maxOutputTokens，或换一个更轻的模型。'
+    }
+    const failure = finish?.failure ?? {}
+    const detail = failure.message || failure.code || 'model call failed'
+    return `模型调用失败：${detail}${failure.code && failure.code !== detail ? ' (' + failure.code + ')' : ''}`
   }
 
   // --------------------------------------------------------------- routes ----
@@ -318,6 +378,7 @@ export function apply(ctx, config = {}) {
         const collected = new Map()
         const warnings = []
         let retried = false
+        let lastFinish = null
         for (const [index, chunk] of chunks.entries()) {
           const result = await translateChunk({
             text: chunk,
@@ -325,7 +386,17 @@ export function apply(ctx, config = {}) {
             style,
             bilingual,
             extra: typeof body.extra === 'string' ? body.extra : undefined,
-            call: (prompt) => streamText(prompt),
+            // `cheap` pins the model's lightest reasoning effort: translating a
+            // paragraph should not spend the output budget on thinking.
+            call: async (prompt) => {
+              const call = await streamTextWithBudget(prompt, { cheap: true })
+              lastFinish = call.finish
+              // The escalation ladder is exhausted and still nothing came back:
+              // fail with the actionable message rather than letting the term
+              // check retry an empty translation.
+              if (call.text.trim() === '') throw new Error(budgetError(call.finish))
+              return call.text
+            },
           })
           parts.push(result.text.trim())
           retried = retried || result.retried
@@ -335,7 +406,7 @@ export function apply(ctx, config = {}) {
           }
         }
         const translation = parts.filter((part) => part !== '').join('\n\n').trim()
-        if (translation === '') throw new Error('模型没有返回译文，请稍后重试或换一个模型。')
+        if (translation === '') throw new Error(budgetError(lastFinish))
         sendJson(res, 200, {
           ok: true,
           mode,
@@ -368,8 +439,11 @@ export function apply(ctx, config = {}) {
           if (!draft.body || !String(draft.body).trim()) { sendJson(res, 400, { ok: false, error: '请先输入笔记正文' }); return }
           prompt = buildReviewPrompt(draft, { existing, extraFocus: body.focus })
         }
-        const review = await streamText(prompt)
-        sendJson(res, 200, { ok: true, id: body.id ?? null, review })
+        // A review is long; give it the growth path too, so a reasoning-heavy
+        // model cannot eat the whole budget and come back empty.
+        const reviewed = await streamTextWithBudget(prompt, { cheap: true })
+        if (reviewed.text.trim() === '') throw new Error(budgetError(reviewed.finish))
+        sendJson(res, 200, { ok: true, id: body.id ?? null, review: reviewed.text })
         return
       }
 

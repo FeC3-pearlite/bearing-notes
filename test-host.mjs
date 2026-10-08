@@ -76,12 +76,38 @@ const ctx = {
       { id: 'deepseek-account', name: 'DeepSeek', models: [{ id: 'deepseek-flash' }] },
     ],
     listModels: async () => [{ id: 'deepseek-flash', name: 'DeepSeek Flash' }],
+    // The real adapter's reasoning metadata: `off/low/high/max`, default high.
+    // A translation call must pin a cheap effort instead of inheriting that.
+    resolveModelInfo: async (provider, model) => ({
+      provider,
+      id: model,
+      reasoning: {
+        efforts: [{ id: 'off' }, { id: 'low' }, { id: 'high' }, { id: 'max' }],
+        defaultEffort: 'high',
+      },
+    }),
     // Emits the real StreamChunk protocol: typed chunks, terminal `finish`.
     async *stream(options) {
       llmCalls++
       lastCall = options
       const userText = options.messages.at(-1).content.map((c) => c.text).join('')
       lastPrompt = userText
+      const script = scripts[scriptIndex] ?? 'review'
+      if (script === 'max-tokens') {
+        // Reasoning-only completion that hits the output cap: text deltas are
+        // empty, the budget is gone, and nothing usable came back.
+        yield { type: 'finish', reason: { kind: 'max-tokens' } }
+        return
+      }
+      if (script === 'max-tokens-then-stop') {
+        if (llmCalls === 1) {
+          yield { type: 'finish', reason: { kind: 'max-tokens' } }
+          return
+        }
+        yield { type: 'text-delta', index: 0, text: '电渣重熔降低总氧含量并提高钢的洁净度，延长 L10 寿命。' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: '### 1. 准确性审阅\n**不准确**：GCr15 的碳化物以 M3C 为主。\n' }
       yield { type: 'text-delta', index: 0, text: '### 3. 相关知识延伸\n- 白蚀区（WEA）与氢陷阱。\n' }
@@ -92,6 +118,16 @@ const ctx = {
 }
 let lastPrompt = ''
 let lastCall = null
+/** Stub behaviours a test can select: 'review' (default) or the truncation cases. */
+const scripts = ['review', 'max-tokens-then-stop', 'max-tokens']
+let scriptIndex = 0
+const calls = []
+const recordCalls = () => {
+  const original = ctx.llm.stream
+  ctx.llm.stream = (options) => { calls.push({ maxTokens: options.maxTokens, reasoningEffort: options.reasoningEffort }); return original.call(ctx.llm, options) }
+}
+recordCalls()
+const useScript = (name) => { scriptIndex = scripts.indexOf(name); llmCalls = 0; calls.length = 0 }
 
 apply(ctx, { ...DEFAULTS, dataDir })
 
@@ -243,6 +279,33 @@ console.log('\n[10] unknown action -> 404')
 {
   const { status } = await call('GET', 'nope')
   check('HTTP 404', status === 404, 'got ' + status)
+}
+
+console.log('\n[10b] a max-tokens finish that eats the whole budget is retried with a bigger one')
+{
+  useScript('max-tokens-then-stop')
+  const { status, json } = await call('POST', 'translate', {
+    text: 'ESR lowers the total oxygen content and improves the cleanliness of the steel, extending L10 life.',
+  })
+  check('HTTP 200 after the retry', status === 200, 'got ' + status)
+  check('the translation came from the second attempt', String(json?.translation).includes('电渣重熔'), String(json?.translation))
+  check('the first attempt used the configured budget', calls[0]?.maxTokens === DEFAULTS.maxOutputTokens, JSON.stringify(calls[0]))
+  check('the retry doubled the budget', calls[1]?.maxTokens === DEFAULTS.maxOutputTokens * 2, JSON.stringify(calls[1]))
+  check('translation pins a cheap reasoning effort', calls[0]?.reasoningEffort === 'off', JSON.stringify(calls[0]))
+  calls.length = 0
+}
+
+console.log('\n[10c] an always-truncating model fails with an actionable message')
+{
+  useScript('max-tokens')
+  const { status, json } = await call('POST', 'translate', { text: 'Bearing steel cleanliness controls rolling contact fatigue life.' })
+  check('HTTP 500', status === 500, 'got ' + status)
+  check('the error names max-tokens', String(json?.error).includes('max-tokens'), json?.error)
+  check('the error names the knob', String(json?.error).includes('maxOutputTokens'), json?.error)
+  check('it stopped after the escalation ladder', calls.length === 3, 'attempts=' + calls.length)
+  check('the ladder ends at 32768', calls.at(-1)?.maxTokens === 32768, JSON.stringify(calls.at(-1)))
+  useScript('review')
+  calls.length = 0
 }
 
 console.log('\n[11] durability: a fresh store reads the same notes back')
