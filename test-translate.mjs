@@ -97,6 +97,19 @@ console.log('\n[4b] a PDF-garbled selection gets the word-restoration rule')
   check('empty text is not flagged', looksLikePdfNoise('') === false)
 }
 
+console.log('\n[4c] welded PDF words still pin glossary terms')
+{
+  // The space-based search finds nothing here; without the second pass the
+  // glossary would silently contribute nothing to a PDF selection.
+  const welded = 'The whiteetchingareas and nonmetallicinclusions drive rollingcontactfatigue in bearing steel.'
+  const terms = findTerms(welded).map((term) => term.en)
+  check('welded white etching area is pinned', terms.includes('white etching area'), terms.join('|'))
+  check('welded rolling contact fatigue is pinned', terms.includes('rolling contact fatigue'), terms.join('|'))
+  check('the welded match is marked', findTerms(welded).find((term) => term.en === 'white etching area')?.welded === true)
+  check('clean text still matches the plain way', findTerms('White etching areas drive rolling contact fatigue.').map((t) => t.en).includes('white etching area'))
+  check('unrelated prose stays clean', findTerms('The wildlife of the countryside is unrelated to bearings.').length === 0)
+}
+
 console.log('\n[5] verification catches dropped terms')
 {
   const terms = requiredTerms('The retained austenite content affects spalling resistance.', 'zh')
